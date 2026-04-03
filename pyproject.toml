@@ -1,6 +1,6 @@
 [project]
 name = "tqvs"
-version = "0.1.0"
+version = "0.1.1"
 description = "Composable vector store with pluggable persistence, dtype quantisation, and similarity search"
 readme = "README.md"
 requires-python = ">=3.12"
