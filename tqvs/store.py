@@ -389,6 +389,77 @@ class VectorStore:
                 rotation_matrix=self._rotation_matrix,
             )
 
+    def score_array(
+        self,
+        vector: NDArray[np.floating],
+        *,
+        prefix: str | None = None,
+        metric: Callable | None = None,
+    ) -> np.ndarray:
+        """Score a query against all vectors, returning a raw float32 array.
+
+        Unlike :meth:`score`, this returns a plain ``np.ndarray`` in insertion
+        order without wrapping each entry in a :class:`QueryResult`.
+        """
+        with self._lock.read_lock():
+            self._ensure_loaded()
+            prefix_idx = self._prefix_index.prefix_indices(prefix) if prefix else None
+            return _qe.score_array_raw(
+                np.asarray(vector, dtype=np.float32),
+                self._active_vectors,
+                self._keys,
+                self._metadata,
+                metric or self._metric,
+                self._dtype,
+                self._active_quant_params,
+                self._dim,
+                prefix=prefix,
+                prefix_indices=prefix_idx,
+                device=self._device,
+                rotation_matrix=self._rotation_matrix,
+            )
+
+    def score_many(
+        self,
+        vectors: NDArray[np.floating],
+        *,
+        metric: Callable | None = None,
+    ) -> np.ndarray:
+        """Score multiple queries at once, returning an (N, M) score matrix.
+
+        Transfers candidate vectors to GPU only once when a torch device is
+        configured.  Prefix filtering is not supported; use the full store.
+        """
+        with self._lock.read_lock():
+            self._ensure_loaded()
+            return _qe.score_batch(
+                np.asarray(vectors, dtype=np.float32),
+                self._active_vectors,
+                self._keys,
+                metric or self._metric,
+                self._dtype,
+                self._active_quant_params,
+                self._dim,
+                device=self._device,
+                rotation_matrix=self._rotation_matrix,
+            )
+
+    @property
+    def vectors(self) -> np.ndarray:
+        """Return the dequantized float32 active vector buffer (shape ``(n, dim)``)."""
+        from tqvs.quantize import dequantize as _dequantize
+        with self._lock.read_lock():
+            self._ensure_loaded()
+            active = self._active_vectors
+            if active is None:
+                return np.empty((0, self._dim), dtype=np.float32)
+            if self._dtype.is_quantized or self._dtype is StoreDtype.BFLOAT16:
+                return _dequantize(
+                    active, self._dtype, self._active_quant_params, self._dim,
+                    rotation_matrix=self._rotation_matrix,
+                )
+            return active.astype(np.float32, copy=False)
+
     # -- persistence ----------------------------------------------------------
 
     def save(self) -> None:

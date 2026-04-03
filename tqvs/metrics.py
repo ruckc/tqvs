@@ -104,11 +104,60 @@ def euclidean_distance_torch(
     return -torch.norm(c - q, dim=1).cpu().numpy()
 
 
+# -- Batch torch variants (transfer candidates once) -----------------------
+
+def cosine_similarity_batch_torch(
+    queries: NDArray[np.floating],
+    candidates: NDArray[np.floating],
+    device: str = "cpu",
+) -> NDArray[np.floating]:
+    """Batched cosine similarity: (N, dim) queries × (M, dim) candidates → (N, M)."""
+    import torch
+
+    q = torch.as_tensor(queries, dtype=torch.float32, device=device)   # (N, D)
+    c = torch.as_tensor(candidates, dtype=torch.float32, device=device)  # (M, D)
+    q_norm = q / q.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    c_norm = c / c.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    return (q_norm @ c_norm.T).cpu().numpy()  # (N, M)
+
+
+def dot_product_batch_torch(
+    queries: NDArray[np.floating],
+    candidates: NDArray[np.floating],
+    device: str = "cpu",
+) -> NDArray[np.floating]:
+    """Batched dot product: (N, dim) × (M, dim) → (N, M)."""
+    import torch
+
+    q = torch.as_tensor(queries, dtype=torch.float32, device=device)
+    c = torch.as_tensor(candidates, dtype=torch.float32, device=device)
+    return (q @ c.T).cpu().numpy()
+
+
+def euclidean_distance_batch_torch(
+    queries: NDArray[np.floating],
+    candidates: NDArray[np.floating],
+    device: str = "cpu",
+) -> NDArray[np.floating]:
+    """Batched neg-euclidean: (N, dim) × (M, dim) → (N, M)."""
+    import torch
+
+    q = torch.as_tensor(queries, dtype=torch.float32, device=device)
+    c = torch.as_tensor(candidates, dtype=torch.float32, device=device)
+    return -torch.cdist(q, c).cpu().numpy()
+
+
 # Map numpy metrics → torch equivalents
 _TORCH_DISPATCH: dict = {
     cosine_similarity: cosine_similarity_torch,
     dot_product: dot_product_torch,
     euclidean_distance: euclidean_distance_torch,
+}
+
+_TORCH_BATCH_DISPATCH: dict = {
+    cosine_similarity: cosine_similarity_batch_torch,
+    dot_product: dot_product_batch_torch,
+    euclidean_distance: euclidean_distance_batch_torch,
 }
 
 
@@ -123,4 +172,14 @@ def resolve_metric(
     """
     if device and _has_torch() and metric in _TORCH_DISPATCH:
         return _TORCH_DISPATCH[metric], device
+    return metric, None
+
+
+def resolve_batch_metric(
+    metric: Callable,
+    device: str | None,
+) -> tuple[Callable, str | None]:
+    """Like :func:`resolve_metric` but returns the *batch* torch variant."""
+    if device and _has_torch() and metric in _TORCH_BATCH_DISPATCH:
+        return _TORCH_BATCH_DISPATCH[metric], device
     return metric, None

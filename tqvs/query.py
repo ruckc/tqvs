@@ -18,7 +18,7 @@ from tqvs.quantize import (
     unpack_int4,
     unpack_int3,
 )
-from tqvs.metrics import cosine_similarity, dot_product, resolve_metric
+from tqvs.metrics import cosine_similarity, dot_product, resolve_metric, resolve_batch_metric
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -114,6 +114,96 @@ def score_all(
         )
         for i in range(len(score_arr))
     ]
+
+
+def score_array_raw(
+    query_vec: NDArray[np.floating],
+    vectors: np.ndarray | None,
+    keys: list[str],
+    metadata: dict[str, Metadata],
+    metric: Callable,
+    dtype: StoreDtype,
+    quant_params: np.ndarray | None,
+    dim: int,
+    *,
+    prefix: str | None = None,
+    prefix_indices: list[int] | None = None,
+    device: str | None = None,
+    rotation_matrix: np.ndarray | None = None,
+) -> np.ndarray:
+    """Score query against all vectors, returning raw float32 score array.
+
+    Unlike :func:`score_all`, this returns a plain numpy array in insertion
+    order (no QueryResult wrapping).  When *prefix* is set the returned array
+    covers only the matching subset.
+    """
+    result = _score_vectors(
+        query_vec, vectors, keys, metadata, metric, dtype,
+        quant_params, dim, prefix=prefix,
+        prefix_indices=prefix_indices, device=device,
+        rotation_matrix=rotation_matrix,
+    )
+    if result is None:
+        return np.empty(0, dtype=np.float32)
+    return result[0]
+
+
+def score_batch(
+    query_vecs: NDArray[np.floating],
+    vectors: np.ndarray | None,
+    keys: list[str],
+    metric: Callable,
+    dtype: StoreDtype,
+    quant_params: np.ndarray | None,
+    dim: int,
+    *,
+    device: str | None = None,
+    rotation_matrix: np.ndarray | None = None,
+) -> np.ndarray:
+    """Score multiple queries in one shot, returning (N, M) score matrix.
+
+    Uses batched torch metric when available to transfer candidates to GPU
+    only once.  Falls back to per-query loop otherwise.
+
+    Prefix filtering is not supported here — callers should pre-filter if
+    needed.
+    """
+    query_vecs = np.asarray(query_vecs, dtype=np.float32)
+    n = query_vecs.shape[0]
+
+    if vectors is None or len(keys) == 0:
+        return np.empty((n, 0), dtype=np.float32)
+
+    # -- prepare candidates (dequantize once) ---------------------------------
+    fast_scores_first = _try_score_quantized(
+        query_vecs[0], vectors, dtype, quant_params, dim, metric, rotation_matrix,
+    )
+    if fast_scores_first is not None:
+        # Quantized fast path exists — use per-query loop
+        m = len(fast_scores_first)
+        out = np.empty((n, m), dtype=np.float32)
+        out[0] = fast_scores_first
+        for i in range(1, n):
+            out[i] = _try_score_quantized(
+                query_vecs[i], vectors, dtype, quant_params, dim, metric, rotation_matrix,
+            )
+        return out
+
+    candidates = _prepare_candidates(
+        vectors, dtype, quant_params, dim, rotation_matrix=rotation_matrix,
+    )
+
+    # -- try batched torch dispatch -------------------------------------------
+    batch_metric, resolved_device = resolve_batch_metric(metric, device)
+    if resolved_device is not None:
+        return batch_metric(query_vecs, candidates, device=resolved_device)
+
+    # -- CPU fallback: per-query loop -----------------------------------------
+    m = candidates.shape[0]
+    out = np.empty((n, m), dtype=np.float32)
+    for i in range(n):
+        out[i] = metric(query_vecs[i], candidates)
+    return out
 
 
 def _score_vectors(
