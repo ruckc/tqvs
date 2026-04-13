@@ -87,6 +87,7 @@ dtypes reduce memory and disk usage at the cost of some precision.
 | `BFLOAT16` | 16 | Brain floating point |
 | `INT8_SYM` | 8 | Symmetric linear quantization |
 | `INT8_ASYM` | 8 | Asymmetric linear quantization |
+| `FP4` | 4 | 4-bit mini-float (E2M1, 2 per byte) |
 | `INT4` | 4 | 4-bit packed (2 per byte) |
 | `INT3` | 3 | 3-bit packed (8 per 3 bytes) |
 | `TURBO_2BIT` | 2 | TurboQuant with random rotation |
@@ -111,7 +112,7 @@ backend only determines how data is serialized to and from disk.
 
 ### Performance comparison
 
-Benchmarked with 1,000,000 128-dimensional vectors, averaged across all 11
+Benchmarked with 1,000,000 128-dimensional vectors, averaged across all 12
 storage dtypes. In-memory operations (add, query, key lookup) are
 backend-independent since the backend is only involved during save/reload.
 
@@ -196,6 +197,7 @@ columnar metadata.
 | `BFLOAT16` | 268 B/vec (25.6 MB) | 280 B/vec | 232 B/vec | 641 B/vec |
 | `INT8_SYM` | 144 B/vec (13.7 MB) | 156 B/vec | 163 B/vec | 393 B/vec |
 | `INT8_ASYM` | 148 B/vec (14.1 MB) | 160 B/vec | 165 B/vec | 401 B/vec |
+| `FP4` | 80 B/vec (7.6 MB) | 92 B/vec | 98 B/vec | 265 B/vec |
 | `INT4` | 80 B/vec (7.6 MB) | 92 B/vec | 98 B/vec | 265 B/vec |
 | `INT3` | 64 B/vec (6.1 MB) | 76 B/vec | 82 B/vec | 233 B/vec |
 | `TURBO_2BIT` | 48 B/vec (4.6 MB) | 60 B/vec | 66 B/vec | 201 B/vec |

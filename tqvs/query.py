@@ -12,9 +12,11 @@ from tqvs._types import Metadata, QueryResult, StoreDtype
 from tqvs.quantize import (
     dequantize,
     _get_turbo_codebook,
+    _FP4_TABLE,
     _unpack_turbo2,
     _unpack_turbo3,
     _unpack_turbo4,
+    unpack_fp4,
     unpack_int4,
     unpack_int3,
 )
@@ -174,12 +176,19 @@ def score_batch(
     if vectors is None or len(keys) == 0:
         return np.empty((n, 0), dtype=np.float32)
 
-    # -- prepare candidates (dequantize once) ---------------------------------
+    # -- try batched torch dispatch first (dequantize once, GPU matmul) -------
+    batch_metric, resolved_device = resolve_batch_metric(metric, device)
+    if resolved_device is not None:
+        candidates = _prepare_candidates(
+            vectors, dtype, quant_params, dim, rotation_matrix=rotation_matrix,
+        )
+        return batch_metric(query_vecs, candidates, device=resolved_device)
+
+    # -- quantized fast path (per-query loop, CPU) ----------------------------
     fast_scores_first = _try_score_quantized(
         query_vecs[0], vectors, dtype, quant_params, dim, metric, rotation_matrix,
     )
     if fast_scores_first is not None:
-        # Quantized fast path exists — use per-query loop
         m = len(fast_scores_first)
         out = np.empty((n, m), dtype=np.float32)
         out[0] = fast_scores_first
@@ -189,16 +198,11 @@ def score_batch(
             )
         return out
 
+    # -- CPU fallback: dequantize once, per-query loop ------------------------
     candidates = _prepare_candidates(
         vectors, dtype, quant_params, dim, rotation_matrix=rotation_matrix,
     )
 
-    # -- try batched torch dispatch -------------------------------------------
-    batch_metric, resolved_device = resolve_batch_metric(metric, device)
-    if resolved_device is not None:
-        return batch_metric(query_vecs, candidates, device=resolved_device)
-
-    # -- CPU fallback: per-query loop -----------------------------------------
     m = candidates.shape[0]
     out = np.empty((n, m), dtype=np.float32)
     for i in range(n):
@@ -250,24 +254,27 @@ def _score_vectors(
     # -- prepare candidates ---------------------------------------------------
     query = np.asarray(query_vec, dtype=np.float32)
 
-    # -- try quantized-domain fast path ---------------------------------------
-    fast_scores = _try_score_quantized(
-        query, sub_vectors, dtype, sub_qp, dim, metric, rotation_matrix,
-    )
-    if fast_scores is not None:
-        scores: np.ndarray = fast_scores
-    else:
+    # -- resolve torch dispatch -----------------------------------------------
+    resolved_metric, resolved_device = resolve_metric(metric, device)
+
+    if resolved_device is not None:
+        # GPU available — dequantize once and use torch metric (faster than
+        # quantized-domain CPU fast paths for large stores).
         candidates = _prepare_candidates(
             sub_vectors, dtype, sub_qp, dim, rotation_matrix=rotation_matrix,
         )
-
-        # -- resolve torch dispatch -------------------------------------------
-        resolved_metric, resolved_device = resolve_metric(metric, device)
-
-        # -- score ------------------------------------------------------------
-        if resolved_device is not None:
-            scores = resolved_metric(query, candidates, device=resolved_device)
+        scores: np.ndarray = resolved_metric(query, candidates, device=resolved_device)
+    else:
+        # CPU — try quantized-domain fast path first
+        fast_scores = _try_score_quantized(
+            query, sub_vectors, dtype, sub_qp, dim, metric, rotation_matrix,
+        )
+        if fast_scores is not None:
+            scores = fast_scores
         else:
+            candidates = _prepare_candidates(
+                sub_vectors, dtype, sub_qp, dim, rotation_matrix=rotation_matrix,
+            )
             scores = resolved_metric(query, candidates)
 
     return scores, sub_keys
@@ -330,6 +337,9 @@ def _try_score_quantized(
 
     if dtype is StoreDtype.INT8_ASYM:
         return _score_int8_asym(query, vectors, quant_params, dim, metric)
+
+    if dtype is StoreDtype.FP4:
+        return _score_fp4(query, vectors, quant_params, dim, metric)
 
     if dtype is StoreDtype.INT4:
         return _score_int4(query, vectors, quant_params, dim, metric)
@@ -416,6 +426,36 @@ def _score_int8_asym(
         return adjusted_dots / (q_norm * c_norms)
 
     return adjusted_dots
+
+
+# ---------------------------------------------------------------------------
+# FP4: direct scoring without full dequantization
+# ---------------------------------------------------------------------------
+
+
+def _score_fp4(
+    query: NDArray[np.float32],
+    packed: np.ndarray,
+    quant_params: np.ndarray | None,
+    dim: int,
+    metric: Callable,
+) -> np.ndarray:
+    """Score FP4 quantized data against a float32 query."""
+    assert quant_params is not None
+    scale = quant_params[:, 0:1]  # (n, 1)
+    codes = unpack_fp4(packed, dim)  # (n, dim) uint8
+    unpacked = _FP4_TABLE[codes]  # (n, dim) float32
+    dots = unpacked @ query  # (n,)
+
+    if metric is cosine_similarity:
+        q_norm = np.linalg.norm(query)
+        if q_norm == 0:
+            return np.zeros(packed.shape[0], dtype=np.float32)
+        d_norms = np.linalg.norm(unpacked, axis=1)
+        d_norms = np.where(d_norms == 0, 1.0, d_norms)
+        return (dots * scale[:, 0]) / (q_norm * d_norms * scale[:, 0])
+
+    return dots * scale[:, 0]
 
 
 # ---------------------------------------------------------------------------

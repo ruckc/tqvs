@@ -259,6 +259,37 @@ class VectorStore:
                 float_vec = row.astype(np.float32, copy=True)
             return float_vec, md
 
+    def get_many(
+        self,
+        keys: list[str],
+    ) -> np.ndarray:
+        """Retrieve multiple vectors by key as a single (N, dim) float32 array.
+
+        More efficient than calling :meth:`get` in a loop — acquires the
+        lock once and batch-dequantizes all rows together.
+        """
+        with self._lock.read_lock():
+            self._ensure_loaded()
+            indices = np.empty(len(keys), dtype=np.intp)
+            for i, key in enumerate(keys):
+                idx = self._key_index.get(key)
+                if idx is None:
+                    raise KeyError(key)
+                indices[i] = idx
+
+            rows = self._vectors[indices]  # type: ignore[index]
+            if self._dtype.is_quantized or self._dtype is StoreDtype.BFLOAT16:
+                qp = (
+                    self._quant_params[indices]
+                    if self._quant_params is not None
+                    else None
+                )
+                return dequantize(
+                    rows, self._dtype, qp, self._dim,
+                    rotation_matrix=self._rotation_matrix,
+                )
+            return rows.astype(np.float32, copy=True)
+
     def update(
         self,
         key: str,

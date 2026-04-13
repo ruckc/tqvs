@@ -32,6 +32,7 @@ class StoreDtype(enum.Enum):
     BFLOAT16 = "bfloat16"
     INT8_SYM = "int8_sym"
     INT8_ASYM = "int8_asym"
+    FP4 = "fp4"
     INT4 = "int4"
     INT3 = "int3"
     TURBO_2BIT = "turbo_2bit"
@@ -58,6 +59,7 @@ _QUANTIZED: frozenset[StoreDtype] = frozenset(
     {
         StoreDtype.INT8_SYM,
         StoreDtype.INT8_ASYM,
+        StoreDtype.FP4,
         StoreDtype.INT4,
         StoreDtype.INT3,
         StoreDtype.TURBO_2BIT,
@@ -77,6 +79,7 @@ _NUMPY_DTYPES: dict[StoreDtype, np.dtype] = {
     StoreDtype.BFLOAT16: np.dtype(np.uint16),  # reinterpreted via view
     StoreDtype.INT8_SYM: np.dtype(np.int8),
     StoreDtype.INT8_ASYM: np.dtype(np.int8),
+    StoreDtype.FP4: np.dtype(np.uint8),  # packed: 2 values per byte (E2M1)
     StoreDtype.INT4: np.dtype(np.uint8),  # packed: 2 values per byte
     StoreDtype.INT3: np.dtype(np.uint8),  # packed: 8 values per 3 bytes
     StoreDtype.TURBO_2BIT: np.dtype(np.uint8),  # packed: 4 values per byte

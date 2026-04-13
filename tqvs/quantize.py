@@ -95,6 +95,8 @@ def quantize(
             return _quantize_int8_sym(vectors)
         case StoreDtype.INT8_ASYM:
             return _quantize_int8_asym(vectors)
+        case StoreDtype.FP4:
+            return _quantize_fp4(vectors)
         case StoreDtype.INT4:
             return _quantize_int4(vectors)
         case StoreDtype.INT3:
@@ -137,6 +139,8 @@ def dequantize(
             return _dequantize_int8_sym(data, quant_params)
         case StoreDtype.INT8_ASYM:
             return _dequantize_int8_asym(data, quant_params)
+        case StoreDtype.FP4:
+            return _dequantize_fp4(data, quant_params, dim)
         case StoreDtype.INT4:
             return _dequantize_int4(data, quant_params, dim)
         case StoreDtype.INT3:
@@ -318,6 +322,82 @@ def _dequantize_int8_asym(
     scale = quant_params[:, 0:1]  # (n, 1)
     zero_point = quant_params[:, 1:2]  # (n, 1)
     return (data.view(np.uint8).astype(np.float32) - zero_point) * scale
+
+
+# ---------------------------------------------------------------------------
+# FP4 (E2M1 mini-float with per-vector scale)
+# ---------------------------------------------------------------------------
+
+# E2M1 codebook: 1 sign bit, 2 exponent bits, 1 mantissa bit, bias=1.
+# Positive values (codes 0-7): 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+# Negative values (codes 8-15): -0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
+_FP4_TABLE = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    dtype=np.float32,
+)
+
+# Sorted positive representable values and their midpoint boundaries
+_FP4_POS_VALS = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+_FP4_POS_BOUNDS = (_FP4_POS_VALS[:-1] + _FP4_POS_VALS[1:]) / 2  # midpoints
+
+
+def _quantize_fp4(
+    vectors: NDArray[np.float32],
+) -> tuple[np.ndarray, np.ndarray]:
+    abs_max = np.max(np.abs(vectors), axis=1, keepdims=True)
+    abs_max = np.where(abs_max == 0, 1.0, abs_max)
+    scale = abs_max / 6.0  # (n, 1) — 6.0 is the largest FP4 magnitude
+    scaled = vectors / scale  # (n, dim)
+
+    signs = (scaled < 0).astype(np.uint8)  # 0 or 1
+    abs_scaled = np.abs(scaled)  # (n, dim)
+
+    # Nearest FP4 code via searchsorted on positive boundaries
+    codes = np.searchsorted(_FP4_POS_BOUNDS, abs_scaled).astype(np.uint8)  # 0..7
+    codes = (signs << 3) | codes  # 4-bit FP4 code
+
+    packed = pack_fp4(codes)
+    return packed, scale.astype(np.float32)
+
+
+def _dequantize_fp4(
+    data: np.ndarray, quant_params: np.ndarray | None, dim: int
+) -> NDArray[np.float32]:
+    assert quant_params is not None
+    scale = quant_params[:, 0:1]  # (n, 1)
+    codes = unpack_fp4(data, dim)  # (n, dim) uint8 0..15
+    return _FP4_TABLE[codes] * scale
+
+
+def pack_fp4(codes: np.ndarray) -> np.ndarray:
+    """Pack 4-bit FP4 codes (0..15) into uint8.
+
+    Two values per byte: low nibble first.
+    *codes* shape ``(n, dim)`` → ``(n, ceil(dim/2))``.
+    """
+    n, dim = codes.shape
+    if dim % 2:
+        codes = np.concatenate(
+            [codes, np.zeros((n, 1), dtype=codes.dtype)], axis=1
+        )
+    low = codes[:, 0::2].astype(np.uint8)
+    high = codes[:, 1::2].astype(np.uint8)
+    return (low | (high << 4)).astype(np.uint8)
+
+
+def unpack_fp4(packed: np.ndarray, dim: int) -> np.ndarray:
+    """Unpack uint8 array back to 4-bit FP4 codes (0..15).
+
+    Returns shape ``(n, dim)`` with dtype uint8.
+    """
+    low = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+    n = packed.shape[0]
+    interleaved = np.empty((n, packed.shape[1] * 2), dtype=np.uint8)
+    interleaved[:, 0::2] = low
+    interleaved[:, 1::2] = high
+    return interleaved[:, :dim]
 
 
 # ---------------------------------------------------------------------------
